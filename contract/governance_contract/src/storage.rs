@@ -71,7 +71,7 @@ pub struct Proposal {
     pub eta: u64, // Estimated time for execution after queuing
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 #[contracttype]
 pub struct VoteRecord {
     pub voter: Address,

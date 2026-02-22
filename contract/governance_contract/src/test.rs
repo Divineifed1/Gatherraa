@@ -1,8 +1,8 @@
 #![cfg(test)]
 
 use super::*;
-use soroban_sdk::testutils::{Address as _, Ledger};
-use soroban_sdk::{token, Address, Env};
+use soroban_sdk::testutils::{Address as _, Ledger, LedgerInfo};
+use soroban_sdk::{token, Address, Env, Vec};
 
 #[test]
 fn test_governance_lifecycle() {
@@ -15,25 +15,19 @@ fn test_governance_lifecycle() {
     let voter1 = Address::generate(&env);
     let voter2 = Address::generate(&env);
 
-    // Create a mock token
     let token_admin = Address::generate(&env);
     let token_addr = env.register_stellar_asset_contract(token_admin.clone());
     let token_client = token::StellarAssetClient::new(&env, &token_addr);
-    let token_query = token::Client::new(&env, &token_addr);
 
-    // Mint tokens
     token_client.mint(&proposer, &500);
     token_client.mint(&voter1, &1000);
     token_client.mint(&voter2, &200);
 
-    // Register governance contract
-    let contract_id = env.register_contract(None, GovernanceContract);
+    let contract_id = env.register(GovernanceContract, ());
     let client = GovernanceContractClient::new(&env, &contract_id);
 
-    // Init
     client.init(&admin, &token_addr, &100, &emergency);
 
-    // Create Proposal
     let action = GovernanceAction::ParameterChange(String::from_str(&env, "fee"), 50);
     let prop_id = client.create_proposal(
         &proposer,
@@ -44,25 +38,39 @@ fn test_governance_lifecycle() {
 
     assert_eq!(prop_id, 1);
 
-    // Vote
     client.vote(&voter1, &prop_id, &true, &false, &Vec::new(&env));
     client.vote(&voter2, &prop_id, &false, &false, &Vec::new(&env));
 
-    // Fast forward ledgers to end of voting period
-    env.ledger().set_sequence(env.ledger().sequence() + 101);
+    env.ledger().set(LedgerInfo {
+        timestamp: env.ledger().timestamp(),
+        protocol_version: 21,
+        sequence_number: env.ledger().sequence() + 101,
+        network_id: [0u8; 32],
+        base_reserve: 10,
+        max_entry_ttl: 1000,
+        min_persistent_entry_ttl: 1000,
+        min_temp_entry_ttl: 1000,
+    });
 
-    // Queue
     client.queue(&prop_id);
 
-    // Check status
-    // (In a real test we'd check the proposal struct, but we need a way to read it)
-    // Let's add a getter or just check if execute works
-    
-    // Fast forward time for timelock
-    env.ledger().set_timestamp(env.ledger().timestamp() + 101);
+    env.ledger().set(LedgerInfo {
+        timestamp: env.ledger().timestamp() + 101,
+        protocol_version: 21,
+        sequence_number: env.ledger().sequence() + 1,
+        network_id: [0u8; 32],
+        base_reserve: 10,
+        max_entry_ttl: 1000,
+        min_persistent_entry_ttl: 1000,
+        min_temp_entry_ttl: 1000,
+    });
 
-    // Execute
     client.execute(&prop_id);
+    
+    let prop = client.get_proposal(&prop_id);
+    if let ProposalStatus::Executed = prop.status {} else {
+        panic!("Proposal should be executed");
+    }
 }
 
 #[test]
@@ -80,9 +88,9 @@ fn test_quadratic_voting() {
     let token_client = token::StellarAssetClient::new(&env, &token_addr);
 
     token_client.mint(&proposer, &500);
-    token_client.mint(&voter, &400); // sqrt(400) = 20
+    token_client.mint(&voter, &400); 
 
-    let contract_id = env.register_contract(None, GovernanceContract);
+    let contract_id = env.register(GovernanceContract, ());
     let client = GovernanceContractClient::new(&env, &contract_id);
 
     client.init(&admin, &token_addr, &100, &emergency);
@@ -92,12 +100,24 @@ fn test_quadratic_voting() {
 
     client.vote(&voter, &prop_id, &true, &true, &Vec::new(&env));
 
-    // We can't easily check the proposal state without a getter, 
-    // but we can check if it passes quorum if we set quorum to 20
     client.set_category_settings(&1, &20, &50, &50);
     
-    env.ledger().set_sequence(env.ledger().sequence() + 100);
-    client.queue(&prop_id); // Should succeed if power is 20
+    env.ledger().set(LedgerInfo {
+        timestamp: env.ledger().timestamp(),
+        protocol_version: 21,
+        sequence_number: env.ledger().sequence() + 51,
+        network_id: [0u8; 32],
+        base_reserve: 10,
+        max_entry_ttl: 1000,
+        min_persistent_entry_ttl: 1000,
+        min_temp_entry_ttl: 1000,
+    });
+
+    client.queue(&prop_id); 
+    let prop = client.get_proposal(&prop_id);
+    if let ProposalStatus::Queued = prop.status {} else {
+        panic!("Proposal should be queued, power was {}", prop.total_votes_for);
+    }
 }
 
 #[test]
@@ -119,28 +139,38 @@ fn test_delegation() {
     token_client.mint(&delegator, &1000);
     token_client.mint(&delegatee, &100);
 
-    let contract_id = env.register_contract(None, GovernanceContract);
+    let contract_id = env.register(GovernanceContract, ());
     let client = GovernanceContractClient::new(&env, &contract_id);
 
     client.init(&admin, &token_addr, &100, &emergency);
 
-    // Delegate
     client.delegate(&delegator, &delegatee);
 
     let action = GovernanceAction::FeeChange(100);
     let prop_id = client.create_proposal(&proposer, &action, &ProposalCategory::FeeAdjustment, &String::from_str(&env, "Desc"));
 
-    // Delegatee votes for both
     let mut delegators = Vec::new(&env);
     delegators.push_back(delegator.clone());
     client.vote(&delegatee, &prop_id, &true, &false, &delegators);
     
-    // Total power should be 1100
-    // Set quorum to 1100
     client.set_category_settings(&1, &1100, &50, &50);
     
-    env.ledger().set_sequence(env.ledger().sequence() + 100);
-    client.queue(&prop_id); // Should succeed
+    env.ledger().set(LedgerInfo {
+        timestamp: env.ledger().timestamp(),
+        protocol_version: 21,
+        sequence_number: env.ledger().sequence() + 51,
+        network_id: [0u8; 32],
+        base_reserve: 10,
+        max_entry_ttl: 1000,
+        min_persistent_entry_ttl: 1000,
+        min_temp_entry_ttl: 1000,
+    });
+    
+    client.queue(&prop_id);
+    let prop = client.get_proposal(&prop_id);
+    if let ProposalStatus::Queued = prop.status {} else {
+        panic!("Proposal should be queued");
+    }
 }
 
 #[test]
@@ -150,10 +180,10 @@ fn test_emergency_procedures() {
 
     let admin = Address::generate(&env);
     let emergency = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token_addr = env.register_stellar_asset_contract(token_admin.clone());
 
-    let token_addr = Address::generate(&env);
-
-    let contract_id = env.register_contract(None, GovernanceContract);
+    let contract_id = env.register(GovernanceContract, ());
     let client = GovernanceContractClient::new(&env, &contract_id);
 
     client.init(&admin, &token_addr, &100, &emergency);
