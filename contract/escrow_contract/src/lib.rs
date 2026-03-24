@@ -7,6 +7,9 @@ mod storage_types;
 use storage_types::{DataKey, Escrow, EscrowStatus, RevenueSplit, Milestone, Dispute, 
                    DisputeResolution, ReferralTracker, RevenueSplitConfig, EscrowError};
 
+mod proxy;
+mod upgrade_manager;
+
 use soroban_sdk::{
     contract, contractimpl, symbol_short, vec, map, Address, BytesN, Env, IntoVal, String, Symbol, Vec, Map, U256,
 };
