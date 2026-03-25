@@ -1,5 +1,6 @@
-use soroban_sdk::{Address, BytesN, Env, Symbol, Vec, Map, U256};
+use soroban_sdk::{contracttype, Address, BytesN, Env, Symbol, Vec, Map, U256, String, i128, u64, u32};
 
+#[contracttype]
 #[derive(Clone)]
 pub enum DataKey {
     Admin,
@@ -12,6 +13,9 @@ pub enum DataKey {
     ReferralTracker(Address),
     Dispute(BytesN<32>),
     Milestone(BytesN<32>),
+    ContractConfig,
+    EscrowStatus(BytesN<32>),
+    EscrowReleaseTime(BytesN<32>),
 }
 
 #[derive(Clone)]
@@ -66,6 +70,16 @@ pub struct Dispute {
     pub created_at: u64,
     pub resolved: bool,
     pub resolution: Option<DisputeResolution>,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct EscrowContractConfig {
+    pub admin: Address,
+    pub escrow_management_contract: Address,
+    pub dispute_resolution_contract: Address,
+    pub revenue_splitting_contract: Address,
+    pub referral_tracking_contract: Address,
 }
 
 #[derive(Clone)]
