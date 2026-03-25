@@ -7,6 +7,8 @@ use crate::types::{Config, DataKey, Tier, UserInfo};
 pub struct StakingContract;
 
 const PRECISION: i128 = 1_000_000_000;
+const ADMIN_ROLE: Symbol = symbol_short!("ADMIN");
+const MOD_ROLE: Symbol = symbol_short!("MOD");
 
 /// Reentrancy guard key
 const REENTRANCY_GUARD: Symbol = symbol_short!("reentrant");
@@ -31,20 +33,32 @@ impl StakingContract {
         Self::validate_contract_address(&env, &reward_token);
 
         let config = Config {
-            admin,
-            staking_token,
-            reward_token,
+            admin: admin.clone(),
+            staking_token: staking_token.clone(),
+            reward_token: reward_token.clone(),
             reward_rate,
         };
         write_config(&env, &config);
         write_last_update_time(&env, env.ledger().timestamp());
         env.storage().instance().set(&DataKey::Version, &1u32);
+
+        // Grant initial admin role
+        write_role(&env, ADMIN_ROLE, admin);
+
         extend_instance(&env);
+
+        // Emit event
+        env.events().publish(
+            (Symbol::new(&env, "initialized"), admin),
+            (staking_token, reward_token, reward_rate),
+        );
     }
 
-    pub fn set_tier(env: Env, tier_id: u32, min_amount: i128, reward_multiplier: u32) {
-        let config = read_config(&env);
-        config.admin.require_auth();
+    pub fn set_tier(env: Env, admin: Address, tier_id: u32, min_amount: i128, reward_multiplier: u32) {
+        admin.require_auth();
+        if !has_role(&env, ADMIN_ROLE, admin) {
+            panic!("not authorized");
+        }
 
         let tier = Tier {
             min_amount,
@@ -52,6 +66,12 @@ impl StakingContract {
         };
         write_tier(&env, tier_id, &tier);
         extend_instance(&env);
+
+        // Emit event
+        env.events().publish(
+            (Symbol::new(&env, "tier_set"), tier_id),
+            (min_amount, reward_multiplier),
+        );
     }
 
     pub fn stake(env: Env, user: Address, amount: i128, lock_duration: u64, tier_id: u32) {
@@ -137,6 +157,12 @@ impl StakingContract {
 
         env.storage().instance().remove(&REENTRANCY_GUARD);
         extend_instance(&env);
+
+        // Emit event
+        env.events().publish(
+            (Symbol::new(&env, "staked"), user),
+            (amount, lock_duration, tier_id),
+        );
     }
 
     pub fn claim(env: Env, user: Address, compound: bool) {
@@ -205,6 +231,12 @@ impl StakingContract {
 
         env.storage().instance().remove(&REENTRANCY_GUARD);
         extend_instance(&env);
+
+        // Emit event
+        env.events().publish(
+            (Symbol::new(&env, "claimed"), user),
+            (reward, if compound { 1u32 } else { 0u32 }),
+        );
     }
 
     pub fn unstake(env: Env, user: Address, amount: i128) {
@@ -286,11 +318,19 @@ impl StakingContract {
 
         env.storage().instance().remove(&REENTRANCY_GUARD);
         extend_instance(&env);
+
+        // Emit event
+        env.events().publish(
+            (Symbol::new(&env, "unstaked"), user),
+            (amount, actual_amount),
+        );
     }
 
-    pub fn slash(env: Env, user: Address, amount: i128) {
-        let config = read_config(&env);
-        config.admin.require_auth();
+    pub fn slash(env: Env, admin: Address, user: Address, amount: i128) {
+        admin.require_auth();
+        if !has_role(&env, ADMIN_ROLE, admin) {
+            panic!("not authorized");
+        }
 
         update_reward(&env, Some(&user));
 
@@ -332,6 +372,12 @@ impl StakingContract {
 
         // Slashed tokens stay in contract or could be burned.
         extend_instance(&env);
+
+        // Emit event
+        env.events().publish(
+            (Symbol::new(&env, "slashed"), user),
+            amount,
+        );
     }
 
     pub fn emergency_withdraw(env: Env, user: Address) {
@@ -367,13 +413,21 @@ impl StakingContract {
 
         token_client.transfer(&env.current_contract_address(), &user, &actual_amount);
         extend_instance(&env);
+
+        // Emit event
+        env.events().publish(
+            (Symbol::new(&env, "emergency_withdrawn"), user),
+            (amount, actual_amount),
+        );
     }
 
     // --- UPGRADEABILITY MECHANISMS ---
     // Schedule an upgrade with a timelock (e.g., 24 hours).
-    pub fn schedule_upgrade(env: Env, new_wasm_hash: BytesN<32>, unlock_time: u64) {
-        let config = read_config(&env);
-        config.admin.require_auth();
+    pub fn schedule_upgrade(env: Env, admin: Address, new_wasm_hash: BytesN<32>, unlock_time: u64) {
+        admin.require_auth();
+        if !has_role(&env, ADMIN_ROLE, admin) {
+            panic!("not authorized");
+        }
 
         if env.ledger().timestamp() >= unlock_time {
             panic!("unlock_time must be in the future");
@@ -392,9 +446,11 @@ impl StakingContract {
     }
 
     // Cancel a scheduled upgrade. (Rollback mechanism before execution)
-    pub fn cancel_upgrade(env: Env) {
-        let config = read_config(&env);
-        config.admin.require_auth();
+    pub fn cancel_upgrade(env: Env, admin: Address) {
+        admin.require_auth();
+        if !has_role(&env, ADMIN_ROLE, admin) {
+            panic!("not authorized");
+        }
 
         env.storage().instance().remove(&DataKey::UpgradeTimelock);
         env.events()
@@ -403,9 +459,11 @@ impl StakingContract {
     }
 
     // Execute the scheduled upgrade.
-    pub fn execute_upgrade(env: Env, new_wasm_hash: BytesN<32>) {
-        let config = read_config(&env);
-        config.admin.require_auth();
+    pub fn execute_upgrade(env: Env, admin: Address, new_wasm_hash: BytesN<32>) {
+        admin.require_auth();
+        if !has_role(&env, ADMIN_ROLE, admin) {
+            panic!("not authorized");
+        }
 
         let (scheduled_hash, unlock_time): (BytesN<32>, u64) = env
             .storage()
@@ -432,9 +490,11 @@ impl StakingContract {
     }
 
     // Execute a state migration after an upgrade.
-    pub fn migrate_state(env: Env, new_version: u32) {
-        let config = read_config(&env);
-        config.admin.require_auth();
+    pub fn migrate_state(env: Env, admin: Address, new_version: u32) {
+        admin.require_auth();
+        if !has_role(&env, ADMIN_ROLE, admin) {
+            panic!("not authorized");
+        }
 
         let current_version: u32 = env.storage().instance().get(&DataKey::Version).unwrap_or(1);
         if new_version <= current_version {
@@ -457,6 +517,27 @@ impl StakingContract {
     // Get current contract version
     pub fn version(env: Env) -> u32 {
         env.storage().instance().get(&DataKey::Version).unwrap_or(1)
+    }
+
+    // Role Management
+    pub fn grant_role(env: Env, admin: Address, role: Symbol, address: Address) {
+        admin.require_auth();
+        if !has_role(&env, ADMIN_ROLE, admin) {
+            panic!("not authorized");
+        }
+        write_role(&env, role, address);
+    }
+
+    pub fn revoke_role(env: Env, admin: Address, role: Symbol, address: Address) {
+        admin.require_auth();
+        if !has_role(&env, ADMIN_ROLE, admin) {
+            panic!("not authorized");
+        }
+        remove_role(&env, role, address);
+    }
+
+    pub fn has_role(env: Env, role: Symbol, address: Address) -> bool {
+        has_role(&env, role, address)
     }
 }
 
